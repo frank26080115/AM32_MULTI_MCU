@@ -114,13 +114,13 @@ void transfercomplete(){
 	if(armed && dshot_telemetry){
 	    if(out_put){
      	receiveDshotDma();
-        compute_dshot_flag = 2;
-    // 	make_dshot_package();
+     //   compute_dshot_flag = 2;
+     	make_dshot_package();
 	   	return;
 	    }else{
-         sendDshotDma();
-         compute_dshot_flag = 1;
-	//	 computeDshotDMA();
+        sendDshotDma();
+     //    compute_dshot_flag = 1;
+		 computeDshotDMA();
 	    return;
 	    }
 	}

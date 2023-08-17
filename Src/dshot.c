@@ -12,6 +12,12 @@
 #include "IO.h"
 #include "sounds.h"
 
+//debug///////////////////////////
+uint8_t checkCRC=0;
+uint8_t calcCRC = 0;
+int tocheck = 0;
+
+
 int dpulse[16] = {0} ;
 
 const char gcr_encode_table[16] = { 0b11001,
@@ -53,6 +59,7 @@ char dshot_extended_telemetry = 0;
 uint16_t send_extended_dshot = 0;
 uint16_t processtime = 0;
 uint16_t halfpulsetime = 0;
+uint8_t dshot_telemetry = 0;
 
 
 void computeDshotDMA(){
@@ -63,6 +70,15 @@ halfpulsetime = dshot_frametime >> 5;
 for (int i = 0; i < 16; i++){
 	dpulse[i] = ((dma_buffer[j + (i<<1) +1] - dma_buffer[j + (i<<1)]) > (halfpulsetime)) ;
 }
+
+//#if defined(MCU_F051) || defined(MCU_F031)
+//	         if((dshot_frametime < 1350 ) &&(dshot_frametime > 1150)){
+//				for (int i = 0; i < 16; i++){
+//					dpulse[i] = ((dma_buffer[j + (i<<1) +1] - dma_buffer[j + (i<<1)])>>5) ;
+//				}
+//			}
+//#endif
+
 
 //#if defined(MCU_F051) || defined(MCU_F031)
 ////	         if((dshot_frametime < 200) &&(dshot_frametime > 150)){
@@ -107,12 +123,12 @@ for (int i = 0; i < 16; i++){
 //				}
 //#endif
 
-				uint8_t calcCRC = ((dpulse[0]^dpulse[4]^dpulse[8])<<3
+				calcCRC = ((dpulse[0]^dpulse[4]^dpulse[8])<<3
 						|(dpulse[1]^dpulse[5]^dpulse[9])<<2
 						|(dpulse[2]^dpulse[6]^dpulse[10])<<1
 						|(dpulse[3]^dpulse[7]^dpulse[11])
 				);
-				uint8_t checkCRC = (dpulse[12]<<3 | dpulse[13]<<2 | dpulse[14]<<1 | dpulse[15]);
+				 checkCRC = (dpulse[12]<<3 | dpulse[13]<<2 | dpulse[14]<<1 | dpulse[15]);
 
 				if(!armed){
 					if (dshot_telemetry == 0){
@@ -128,7 +144,8 @@ for (int i = 0; i < 16; i++){
 					checkCRC= ~checkCRC+16;
 				}
 
-				int tocheck = (
+	//			int tocheck = (
+				tocheck = (	
 						dpulse[0]<<10 | dpulse[1]<<9 | dpulse[2]<<8 | dpulse[3]<<7
 						| dpulse[4]<<6 | dpulse[5]<<5 | dpulse[6]<<4 | dpulse[7]<<3
 						| dpulse[8]<<2 | dpulse[9]<<1 | dpulse[10]);

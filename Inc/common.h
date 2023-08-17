@@ -1,8 +1,11 @@
 #pragma once
 
+#include "main.h"
+#include "targets.h"
+
 extern uint8_t eepromBuffer[176];
 extern uint16_t TIMER1_MAX_ARR;
-
+extern uint8_t dshot_telemetry;
 extern uint32_t gcr[37];
 extern uint8_t buffer_padding;
 extern uint16_t adjusted_input;
@@ -21,12 +24,12 @@ extern char ic_timer_prescaler;
 extern uint8_t buffersize;
 extern char output_timer_prescaler;
 extern uint8_t compute_dshot_flag;
-#ifdef STMICRO
- extern GPIO_TypeDef* current_GPIO_PORT;
-#ifndef MCU_F031
- extern COMP_TypeDef* active_COMP;
-#endif
-#endif
+ #ifdef STMICRO
+  extern GPIO_TypeDef* current_GPIO_PORT;
+ #ifndef MCU_F031
+  extern COMP_TypeDef* active_COMP;
+ #endif
+ #endif
 #ifdef GIGADEVICES
 extern uint32_t current_GPIO_PORT;
 #endif
