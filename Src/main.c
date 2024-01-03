@@ -1721,8 +1721,8 @@ void runBrushedDualLoop()
     int8_t dir2 = (crsf_channels[crsf_input_channel2] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel2] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
         (crsf_channels[crsf_input_channel2] > CRSF_CHANNEL_VALUE_MID) ? 1 : -1
     );
-    int16_t inp1 = dir1 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel ]) - CRSF_CHANNEL_VALUE_MID - (dir1 > 0 ? servo_dead_band : -servo_dead_band);
-    int16_t inp2 = dir2 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel2]) - CRSF_CHANNEL_VALUE_MID - (dir2 > 0 ? servo_dead_band : -servo_dead_band);
+    int16_t inp1 = dir1 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel ]) - CRSF_CHANNEL_VALUE_MID - (dir1 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
+    int16_t inp2 = dir2 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel2]) - CRSF_CHANNEL_VALUE_MID - (dir2 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
 
     if (degrees_celsius > TEMPERATURE_LIMIT) {
         duty_cycle_maximum = map(degrees_celsius, TEMPERATURE_LIMIT, TEMPERATURE_LIMIT + 20, TIMER1_MAX_ARR / 2, 1);
@@ -1768,7 +1768,9 @@ void runBrushedDualLoop()
     }
 
     // bi_direction & 0x40 is the flag for boost mode, where tank steering robots can use full voltage instead of half voltage
+    // TIM1->CCR2 is the electrical common tap
     if ((bi_direction & 0x40) != 0 && dir1 > 0 && dir2 > 0) {
+        // both forward, boost enabled
         uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
         uint32_t total = inp1 + inp2;
         uint32_t duty_lim = map(total, 0, nrange, 0, duty_cycle_maximum);
@@ -1780,6 +1782,7 @@ void runBrushedDualLoop()
         TIM1->CCR3 = p2;
     }
     else if ((bi_direction & 0x40) != 0 && dir1 < 0 && dir2 < 0) {
+        // both reverse, boost enabled
         uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
         int16_t abs1 = -inp1;
         int16_t abs2 = -inp2;
@@ -1794,18 +1797,22 @@ void runBrushedDualLoop()
     }
     else if (dir1 == 0 && dir2 == 0)
     {
+        // if armed, this should be braking
         TIM1->CCR2 = 0;
         TIM1->CCR1 = 0;
         TIM1->CCR3 = 0;
     }
     else
     {
+        // half voltage mode
         int32_t nrange = CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band;
         int16_t p1 = map(inp1, -nrange, nrange, 0, duty_cycle_maximum);
-        int16_t p2 = map(inp1, -nrange, nrange, 0, duty_cycle_maximum);
+        int16_t p2 = map(inp2, -nrange, nrange, 0, duty_cycle_maximum);
         TIM1->CCR2 = duty_cycle_mid;
         TIM1->CCR1 = p1;
         TIM1->CCR3 = p2;
+        // I'm pretty sure since all 3 channels are on the same timer, if CCR1 == CCR2, it would be just braking
+        // TODO: can I implement coasting? should I bother? I need to map CCR channel number 1 2 3 against phase A B or C
     }
 }
 #endif
