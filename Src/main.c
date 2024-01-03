@@ -173,6 +173,7 @@
          - Fix dshot telemetry delay f4 and e230 mcu
 
 */
+
 #include <stdint.h>
 #include "main.h"
 #include "targets.h"
@@ -195,7 +196,6 @@
 
 #ifdef USE_CRSF_INPUT
     #include "crsf.h"
-
 #endif
 
 #define VERSION_MAJOR 2
@@ -259,8 +259,6 @@ uint16_t one_khz_loop_counter = 0;
 uint16_t target_e_com_time_high;
 uint16_t target_e_com_time_low;
 uint8_t compute_dshot_flag = 0;
-uint8_t crsf_input_channel = 1;
-uint8_t crsf_output_PWM_channel = 2;
 char eeprom_layout_version = 2;
 char dir_reversed = 0;
 char comp_pwm = 1;
@@ -533,6 +531,10 @@ uint16_t waitTime = 0;
 uint16_t signaltimeout = 0;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
+#ifdef BRUSHED_MODE
+void runBrushedLoop();
+#endif
+
 void checkForHighSignal()
 {
     changeToInput();
@@ -590,8 +592,8 @@ void loadEEpromSettings()
     else {
         dir_reversed = 0;
     }
-    if (eepromBuffer[18] == 0x01) {
-        bi_direction = 1;
+    if (eepromBuffer[18] != 0) {
+        bi_direction = eepromBuffer[18];
     }
     else {
         bi_direction = 0;
@@ -770,6 +772,11 @@ void loadEEpromSettings()
                 break;
             };
         }
+        #ifdef USE_CRSF_INPUT
+        else if ((eepromBuffer[46] & 0x80) != 0) {
+            crsf_input_channel = eepromBuffer[46] & 0x0F;
+        }
+        #endif
         else {
             dshot = 0;
             servoPwm = 0;
@@ -798,8 +805,8 @@ void saveEEpromSettings()
     else {
         eepromBuffer[17] = 0x00;
     }
-    if (bi_direction == 1) {
-        eepromBuffer[18] = 0x01;
+    if (bi_direction != 0) {
+        eepromBuffer[18] = bi_direction;
     }
     else {
         eepromBuffer[18] = 0x00;
@@ -1162,7 +1169,7 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
     else {
 #ifdef FIXED_DUTY_MODE
         input = FIXED_DUTY_MODE_POWER * 20 + 47;
-#else
+#else // FIXED_DUTY_MODE
         if (use_sin_start) {
             if (adjusted_input < 30) {         // dead band ?
                 input = 0;
@@ -1209,7 +1216,7 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
 
             }
         }
-#endif
+#endif // FIXED_DUTY_MODE
     }
     if (tenkhzcounter > LOOP_FREQUENCY_HZ) {    // 1s sample interval 10000
         consumed_current = (float)actual_current / 360 + consumed_current;
@@ -1282,6 +1289,8 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
             telem_ms_count = 0;
         }
     }
+#endif // BRUSHED_MODE
+
 #ifndef BRUSHED_MODE
     if (!stepper_sine) {
         if (input >= 47 + (80 * use_sin_start) && armed) {
@@ -1462,7 +1471,7 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
                 else {
                     max_duty_cycle_change = voltage_based_max_change * 3;
                 }
-#else
+#else // VOLTAGE_BASED_RAMP
                 if (duty_cycle < 150) {
                     max_duty_cycle_change = RAMP_SPEED_STARTUP;
                 }
@@ -1474,7 +1483,7 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
                         max_duty_cycle_change = RAMP_SPEED_HIGH_RPM;
                     }
                 }
-#endif
+#endif // VOLTAGE_BASED_RAMP
 
                 if ((duty_cycle - last_duty_cycle) > max_duty_cycle_change) {
                     duty_cycle = last_duty_cycle + max_duty_cycle_change;
@@ -1515,7 +1524,8 @@ void tenKhzRoutine()   // 20khz as of 2.00 to be renamed
         setAutoReloadPWM(tim1_arr);
         setDutyCycleAll(adjusted_duty_cycle);
     }
-#endif // ndef brushed_mode
+#endif // BRUSHED_MODE
+
 #if defined(FIXED_DUTY_MODE) || defined(FIXED_SPEED_MODE)
     if (getInputPinState()) {
         signaltimeout ++;
@@ -1636,9 +1646,20 @@ void zcfoundroutine()    // only used in polling mode, blocking routine.
         }
     }
 }
+
 #ifdef BRUSHED_MODE
+void runBrushedDualLoop();
+
 void runBrushedLoop()
 {
+    #ifdef USE_CRSF_INPUT
+    if ((bi_direction & 0x80) != 0) {
+        // if the user configured dual motors, run the dual motor loop instead
+        runBrushedDualLoop();
+        return;
+    }
+    #endif
+
     uint16_t brushed_duty_cycle = 0;
 
     if (brushed_direction_set == 0 && adjusted_input > 48) {
@@ -1679,19 +1700,115 @@ void runBrushedLoop()
     }
     if ((brushed_duty_cycle > 0) && armed) {
         setDutyCycleAll(brushed_duty_cycle);
-        //      TIM1->CCR1 = brushed_duty_cycle;
-        //      TIM1->CCR2 = brushed_duty_cycle;
-        //      TIM1->CCR3 = brushed_duty_cycle;
-
     }
     else {
         setDutyCycleAll(0);
-        //      TIM1->CCR1 = 0;                                             //
-        //      TIM1->CCR2 = 0;
-        //      TIM1->CCR3 = 0;
         brushed_direction_set = 0;
     }
 }
+
+#ifdef USE_CRSF_INPUT
+void runBrushedDualLoop()
+{
+    static char has_init_pwm = 0;
+    uint8_t crsf_input_channel2 = bi_direction & 0x0F;
+    // remember that crsf_input_channel is encoded into eepromBuffer[46] & 0x0F
+
+    // take inputs from both channels, determine their directions, and apply deadband
+    int8_t dir1 = (crsf_channels[crsf_input_channel] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
+        (crsf_channels[crsf_input_channel] > CRSF_CHANNEL_VALUE_MID) ? 1 : -1
+    );
+    int8_t dir2 = (crsf_channels[crsf_input_channel2] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel2] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
+        (crsf_channels[crsf_input_channel2] > CRSF_CHANNEL_VALUE_MID) ? 1 : -1
+    );
+    int16_t inp1 = dir1 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel ]) - CRSF_CHANNEL_VALUE_MID - (dir1 > 0 ? servo_dead_band : -servo_dead_band);
+    int16_t inp2 = dir2 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel2]) - CRSF_CHANNEL_VALUE_MID - (dir2 > 0 ? servo_dead_band : -servo_dead_band);
+
+    if (degrees_celsius > TEMPERATURE_LIMIT) {
+        duty_cycle_maximum = map(degrees_celsius, TEMPERATURE_LIMIT, TEMPERATURE_LIMIT + 20, TIMER1_MAX_ARR / 2, 1);
+    }
+    else {
+        duty_cycle_maximum = TIMER1_MAX_ARR - 50;
+    }
+
+    if (use_current_limit) {
+        use_current_limit_adjust -= (int16_t)(doPidCalculations(&currentPid, actual_current, CURRENT_LIMIT * 100) / 10000);
+        if (use_current_limit_adjust < minimum_duty_cycle) {
+            use_current_limit_adjust = minimum_duty_cycle;
+        }
+
+        if (duty_cycle_maximum > use_current_limit_adjust) {
+            duty_cycle_maximum = use_current_limit_adjust;
+        }
+    }
+
+    uint32_t duty_cycle_mid = duty_cycle_maximum / 2; // this represents the center tap voltage if motors are going in opposite directions
+
+    if (!armed) {
+        if (dir1 == 0 && dir2 == 0) {
+            // sticks are centered, allow for arming
+            adjusted_input = 0;
+            // zero_input_count is incremented in the CRSF code
+        }
+        else {
+            // sticks not centered, do not arm
+            zero_input_count = 0;
+        }
+        // stop motors
+        dir1 = 0;
+        dir2 = 0;
+        allOff(); // braking is disabled when not armed
+        has_init_pwm = 0; // initialize pin later
+    }
+    else {
+        // set all pins to PWM mode if not already
+        if (has_init_pwm == 0) {
+            allpwm();
+        }
+    }
+
+    // bi_direction & 0x40 is the flag for boost mode, where tank steering robots can use full voltage instead of half voltage
+    if ((bi_direction & 0x40) != 0 && dir1 > 0 && dir2 > 0) {
+        uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
+        uint32_t total = inp1 + inp2;
+        uint32_t duty_lim = map(total, 0, nrange, 0, duty_cycle_maximum);
+        duty_lim = duty_lim < duty_cycle_mid ? duty_cycle_mid : duty_lim;
+        uint16_t p1 = map(inp1, 0, nrange/2, 0, duty_lim);
+        uint16_t p2 = map(inp2, 0, nrange/2, 0, duty_lim);
+        TIM1->CCR2 = 0;
+        TIM1->CCR1 = p1;
+        TIM1->CCR3 = p2;
+    }
+    else if ((bi_direction & 0x40) != 0 && dir1 < 0 && dir2 < 0) {
+        uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
+        int16_t abs1 = -inp1;
+        int16_t abs2 = -inp2;
+        int32_t total = abs1 + abs2;
+        uint32_t duty_lim = map(total, 0, nrange, 0, duty_cycle_maximum);
+        duty_lim = duty_lim < duty_cycle_mid ? duty_cycle_mid : duty_lim;
+        uint16_t p1 = duty_cycle_maximum - map(abs1, 0, nrange/2, 0, duty_lim);
+        uint16_t p2 = duty_cycle_maximum - map(abs2, 0, nrange/2, 0, duty_lim);
+        TIM1->CCR2 = duty_cycle_maximum;
+        TIM1->CCR1 = p1;
+        TIM1->CCR3 = p2;
+    }
+    else if (dir1 == 0 && dir2 == 0)
+    {
+        TIM1->CCR2 = 0;
+        TIM1->CCR1 = 0;
+        TIM1->CCR3 = 0;
+    }
+    else
+    {
+        int32_t nrange = CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band;
+        int16_t p1 = map(inp1, -nrange, nrange, 0, duty_cycle_maximum);
+        int16_t p2 = map(inp1, -nrange, nrange, 0, duty_cycle_maximum);
+        TIM1->CCR2 = duty_cycle_mid;
+        TIM1->CCR1 = p1;
+        TIM1->CCR3 = p2;
+    }
+}
+#endif
 #endif
 
 int main(void)
@@ -1788,7 +1905,6 @@ int main(void)
 
 #else
 #ifdef BRUSHED_MODE
-    //bi_direction = 1;
     commutation_interval = 5000;
     use_sin_start = 0;
     maskPhaseInterrupts();
@@ -1833,7 +1949,8 @@ int main(void)
 
 #endif
 
-    while (1) {
+    while (1)
+    {
         reloadWatchDogCounter();
 
 #ifndef BRUSHED_MODE
@@ -2142,7 +2259,6 @@ int main(void)
 
 #endif      // gimbal mode
         }  // stepper/sine mode end
-#endif    // end of brushless mode
 
 #ifdef BRUSHED_MODE
         runBrushedLoop();

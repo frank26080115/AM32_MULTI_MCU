@@ -25,6 +25,9 @@
 /* USER CODE BEGIN Includes */
 #include "targets.h"
 #include "ADC.h"
+#ifdef USE_CRSF_INPUT
+#include "crsf.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -314,6 +317,14 @@ void TIM16_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
     /* USER CODE BEGIN USART1_IRQn 0 */
+    if(LL_USART_IsActiveFlag_IDLE(USART1)) {
+        LL_USART_ClearFlag_IDLE(USART1);
+        LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+#ifdef USE_CRSF_INPUT
+        crsf_decode();
+        crsf_startDma();
+#endif
+    }
 
     /* USER CODE END USART1_IRQn 0 */
     /* USER CODE BEGIN USART1_IRQn 1 */
