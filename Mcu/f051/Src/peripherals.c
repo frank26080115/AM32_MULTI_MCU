@@ -30,12 +30,14 @@ void initCorePeripherals(void)
     MX_TIM6_Init();
     MX_TIM17_Init();
     UN_TIM_Init();
-#ifdef USE_SERIAL_TELEMETRY
-    telem_UART_Init();
-#endif
 #ifdef USE_CRSF_INPUT
     crsf_UART_Init();
     crsf_startDma();
+    #if defined(USE_SERIAL_TELEMETRY) && INPUT_PIN == LL_GPIO_PIN_2
+    telem_UART_Init();
+    #endif
+#elif defined(USE_SERIAL_TELEMETRY)
+    telem_UART_Init();
 #endif
 }
 
@@ -359,6 +361,10 @@ void MX_GPIO_Init(void)
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_3 | LL_GPIO_PIN_5;
+    LL_GPIO_ResetOutputPin(GPIOB, GPIO_InitStruct.Pin);
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 #endif
 }
 
@@ -632,21 +638,82 @@ void enableCorePeripherals()
 #ifdef USE_CRSF_INPUT
 void crsf_UART_Init(void)
 {
+    USART_TypeDef* usart;
+    GPIO_TypeDef* gpio;
+    uint32_t gpio_pin;
+
     LL_USART_InitTypeDef USART_InitStruct = {0};
     LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* Peripheral clock enable */
-    LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_USART1);
-    LL_AHB1_GRP1_EnableClock(INPUT_PIN_PORT == GPIOB ? LL_AHB1_GRP1_PERIPH_GPIOB : LL_AHB1_GRP1_PERIPH_GPIOA);
-    GPIO_InitStruct.Pin = INPUT_PIN;
     GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
     GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
     GPIO_InitStruct.Alternate = LL_GPIO_AF_0;
-    LL_GPIO_Init(INPUT_PIN_PORT, &GPIO_InitStruct);
 
-    /* USART1_TX Init */
+    /*
+    PA2 as input means PA2 is UART
+    PB4 as input means we need to use telemetry port as UART
+    telemetry pins are usually TX, but the USART can swan TX and RX pin mappings
+    */
+    #if INPUT_PIN == LL_GPIO_PIN_2
+    LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_USART1);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+    usart = USART1;
+    gpio = GPIOA;
+    gpio_pin = INPUT_PIN;
+    NVIC_SetPriority(USART1_IRQn, 2);
+    NVIC_EnableIRQ(USART1_IRQn);
+    #else // INPUT_PIN is 4
+    #ifdef USE_PA14_TELEMETRY
+    LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_USART2);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+    usart = USART2;
+    gpio = GPIOA;
+    gpio_pin = LL_GPIO_PIN_14;
+    NVIC_SetPriority(USART2_IRQn, 2);
+    NVIC_EnableIRQ(USART2_IRQn);
+    #else // USE_PA14_TELEMETRY
+    LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_USART1);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
+    usart = USART1;
+    gpio = GPIOB;
+    gpio_pin = LL_GPIO_PIN_6;
+    NVIC_SetPriority(USART1_IRQn, 2);
+    NVIC_EnableIRQ(USART1_IRQn);
+    #endif // USE_PA14_TELEMETRY
+    #endif
+
+    LL_GPIO_Init(gpio, &GPIO_InitStruct);
+
+    USART_InitStruct.BaudRate = 
+        #ifdef CRSF_SLOW
+            19200
+        #else
+            420000
+        #endif
+        ;
+    USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
+    USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
+    USART_InitStruct.Parity = LL_USART_PARITY_NONE;
+    USART_InitStruct.TransferDirection = LL_USART_DIRECTION_RX;
+    USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
+    USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
+    LL_USART_Init(usart, &USART_InitStruct);
+    LL_USART_DisableIT_CTS(usart);
+
+    #if INPUT_PIN == LL_GPIO_PIN_2
+    usart->CR3 |= USART_CR3_HDSEL; // half duplex
+    #else // INPUT_PIN is 4
+    #ifdef USE_PA14_TELEMETRY
+    usart->CR2 |= USART_CR2_SWAP; // swap RX and TX
+    #else // USE_PA14_TELEMETRY
+    usart->CR2 |= USART_CR2_SWAP; // swap RX and TX
+    #endif // USE_PA14_TELEMETRY
+    #endif
+
+    LL_USART_Enable(usart);
+
     LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_3, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
     LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_3, LL_DMA_PRIORITY_LOW);
     LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MODE_CIRCULAR);
@@ -654,35 +721,25 @@ void crsf_UART_Init(void)
     LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MEMORY_INCREMENT);
     LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_3, LL_DMA_PDATAALIGN_BYTE);
     LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MDATAALIGN_BYTE);
-
-    /* USART1 interrupt Init */
-    NVIC_SetPriority(USART1_IRQn, 2);
-    NVIC_EnableIRQ(USART1_IRQn);
-
-    USART_InitStruct.BaudRate = 420000;
-    USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
-    USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
-    USART_InitStruct.Parity = LL_USART_PARITY_NONE;
-    USART_InitStruct.TransferDirection = LL_USART_DIRECTION_RX;
-    USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
-    USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
-    LL_USART_Init(USART1, &USART_InitStruct);
-    LL_USART_DisableIT_CTS(USART1);
-    USART1->CR3 |= (1 << 3);  // half duplex
-    LL_USART_Enable(USART1);
-
-    //   set dma address
     LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_3,
-                           LL_USART_DMA_GetRegAddr(USART1, LL_USART_DMA_REG_DATA_RECEIVE),
+                           LL_USART_DMA_GetRegAddr(usart, LL_USART_DMA_REG_DATA_RECEIVE),
                            (uint32_t)&crsf_buffer,
                            LL_DMA_GetDataTransferDirection(DMA1, LL_DMA_CHANNEL_3));
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, 64);
-    USART1->CR1 |= (1<<4); // idle line interrupt
+    usart->CR1 |= USART_CR1_IDLEIE; // idle line interrupt
 }
 
 void crsf_startDma() {
     LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, 64);
+    #if INPUT_PIN == LL_GPIO_PIN_2
     LL_USART_EnableDMAReq_RX(USART1);
+    #else // INPUT_PIN is 4
+    #ifdef USE_PA14_TELEMETRY
+    LL_USART_EnableDMAReq_RX(USART2);
+    #else // USE_PA14_TELEMETRY
+    LL_USART_EnableDMAReq_RX(USART1);
+    #endif // USE_PA14_TELEMETRY
+    #endif
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);
 }
 #endif

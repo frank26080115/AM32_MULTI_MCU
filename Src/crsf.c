@@ -115,6 +115,7 @@ void crsf_decode()
         } else {
             zero_input_count = 0;
         }
+        inputSet = 1;
     } else {
         invalid_crc++;
     }

@@ -774,6 +774,7 @@ void loadEEpromSettings()
         }
         #ifdef USE_CRSF_INPUT
         else if ((eepromBuffer[46] & 0x80) != 0) {
+            // input mode item is used to select CRSF channel
             crsf_input_channel = eepromBuffer[46] & 0x0F;
         }
         #endif
@@ -1652,6 +1653,12 @@ void runBrushedDualLoop();
 
 void runBrushedLoop()
 {
+    if (!armed) {
+        if (zero_input_count > 4) {
+            armed = 1;
+        }
+    }
+
     #ifdef USE_CRSF_INPUT
     if ((bi_direction & 0x80) != 0) {
         // if the user configured dual motors, run the dual motor loop instead
@@ -1708,21 +1715,132 @@ void runBrushedLoop()
 }
 
 #ifdef USE_CRSF_INPUT
+void dualBrushedSetPWM(uint16_t common, uint16_t m1, uint16_t m2)
+{
+    // it might be wise to keep the common half-bridge operating as close to 50% duty as possible
+    // doing this will prevent large jumps in the common voltage
+    // these limits do not need to care about thermal or current limits, because the values passed into this function area already scaled to be limited
+    uint32_t max_duty = TIMER1_MAX_ARR - 50;
+    uint32_t mid_duty = TIMER1_MAX_ARR / 2;
+    static uint16_t tgt_duty = 0;
+
+    // if all motors are stopped, ramp down the common voltage slowly
+    if (common != 0 || m1 != 0 || m2 != 0) {
+        if (tgt_duty < mid_duty) {
+            tgt_duty += 1;
+        }
+    }
+    else { // all zeros
+        if (tgt_duty > 0) {
+            tgt_duty -= 1;
+        }
+    }
+
+    if (common < tgt_duty) {
+        uint16_t wanted = tgt_duty - common;
+        uint16_t upper = m1 > m2 ? m1 : m2;
+        uint16_t headroom = max_duty - upper;
+        uint16_t toadd = wanted > headroom ? headroom : wanted;
+        common += toadd;
+        m1     += toadd;
+        m2     += toadd;
+        if (toadd == 0) {
+            // speed requires specific common voltage
+            tgt_duty = common > mid_duty ? mid_duty : common;
+        }
+    }
+    else if (common > tgt_duty)
+    {
+        uint16_t wanted = common - tgt_duty;
+        uint16_t lower = m1 < m2 ? m1 : m2;
+        uint16_t tosub = wanted > lower ? lower : wanted;
+        common -= tosub;
+        m1 -= tosub;
+        m2 -= tosub;
+        if (tosub == 0) {
+            // speed requires specific common voltage
+            tgt_duty = common > mid_duty ? mid_duty : common;
+        }
+    }
+
+    uint8_t mode = eepromBuffer[27] % 6; // motor poles EEPROM item used to determine which phase is used as which pin
+    // I personally solder two connectors to the center tab and then one connector each to each side tabs
+    // and then I would change this EEPROM byte until the behavior matches what I have soldered
+    switch (mode)
+    {
+        case 0:
+            TIM1->CCR1 = common;
+            TIM1->CCR2 = m1;
+            TIM1->CCR3 = m2;
+            break;
+        case 1:
+            TIM1->CCR1 = common;
+            TIM1->CCR3 = m1;
+            TIM1->CCR2 = m2;
+            break;
+        case 2:
+            TIM1->CCR2 = common;
+            TIM1->CCR1 = m1;
+            TIM1->CCR3 = m2;
+            break;
+        case 3:
+            TIM1->CCR2 = common;
+            TIM1->CCR3 = m1;
+            TIM1->CCR1 = m2;
+            break;
+        case 4:
+            TIM1->CCR3 = common;
+            TIM1->CCR1 = m1;
+            TIM1->CCR2 = m2;
+            break;
+        case 5:
+            TIM1->CCR3 = common;
+            TIM1->CCR2 = m1;
+            TIM1->CCR1 = m2;
+            break;
+        default:
+            TIM1->CCR1 = common;
+            TIM1->CCR2 = m1;
+            TIM1->CCR3 = m2;
+            break;
+    }
+}
+
 void runBrushedDualLoop()
 {
     static char has_init_pwm = 0;
+
+    uint16_t ctrl_val_mid, ctrl_val_max, ctrl_deadband;
+    int16_t inp1, inp2; // 0 is center, (ctrl_val_mid - ctrl_deadband) is limit
+    int8_t dir1, dir2; // direction indication, 0 means not moving
+
+    #ifdef USE_CRSF_INPUT
+    ctrl_val_mid = CRSF_CHANNEL_VALUE_MID;
+    ctrl_val_max = CRSF_CHANNEL_VALUE_MAX;
+    ctrl_deadband = servo_dead_band;
+
     uint8_t crsf_input_channel2 = bi_direction & 0x0F;
-    // remember that crsf_input_channel is encoded into eepromBuffer[46] & 0x0F
+    // remember that crsf_input_channel is encoded into eepromBuffer[46] & 0x0F, which is the input mode
 
     // take inputs from both channels, determine their directions, and apply deadband
-    int8_t dir1 = (crsf_channels[crsf_input_channel] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
+    dir1 = (crsf_channels[crsf_input_channel] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
         (crsf_channels[crsf_input_channel] > CRSF_CHANNEL_VALUE_MID) ? 1 : -1
     );
-    int8_t dir2 = (crsf_channels[crsf_input_channel2] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel2] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
+    dir2 = (crsf_channels[crsf_input_channel2] >= (CRSF_CHANNEL_VALUE_MID - servo_dead_band) && crsf_channels[crsf_input_channel2] <= (CRSF_CHANNEL_VALUE_MID + servo_dead_band)) ? 0 : (
         (crsf_channels[crsf_input_channel2] > CRSF_CHANNEL_VALUE_MID) ? 1 : -1
     );
-    int16_t inp1 = dir1 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel ]) - CRSF_CHANNEL_VALUE_MID - (dir1 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
-    int16_t inp2 = dir2 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel2]) - CRSF_CHANNEL_VALUE_MID - (dir2 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
+    inp1 = dir1 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel ]) - CRSF_CHANNEL_VALUE_MID - (dir1 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
+    inp2 = dir2 == 0 ? 0 : ((int16_t)crsf_channels[crsf_input_channel2]) - CRSF_CHANNEL_VALUE_MID - (dir2 > 0 ? servo_dead_band : -servo_dead_band); // centered at 0 with no deadband
+    #elif defined(TELEM_PIN_AS_RC_PWM)
+    ctrl_val_mid = 1000;
+    ctrl_val_max = ctrl_val_mid * 2;
+    ctrl_deadband = 0; // assume input process already removed the deadband
+
+    inp1 = map(adjusted_input, 48, 2047, 0, ctrl_val_max) - ctrl_val_mid;
+    inp2 = map(adjusted_input_2, 48, 2047, 0, ctrl_val_max) - ctrl_val_mid;
+    dir1 = (inp1 == 0) ? 0 : ((inp1 > 0) ? 1 : -1);
+    dir2 = (inp2 == 0) ? 0 : ((inp2 > 0) ? 1 : -1);
+    #endif
 
     if (degrees_celsius > TEMPERATURE_LIMIT) {
         duty_cycle_maximum = map(degrees_celsius, TEMPERATURE_LIMIT, TEMPERATURE_LIMIT + 20, TIMER1_MAX_ARR / 2, 1);
@@ -1763,54 +1881,88 @@ void runBrushedDualLoop()
     else {
         // set all pins to PWM mode if not already
         if (has_init_pwm == 0) {
+            comp_pwm = 1; // I think this is required for braking mode
             allpwm();
         }
     }
 
-    // bi_direction & 0x40 is the flag for boost mode, where tank steering robots can use full voltage instead of half voltage
-    // TIM1->CCR2 is the electrical common tap
-    if ((bi_direction & 0x40) != 0 && dir1 > 0 && dir2 > 0) {
-        // both forward, boost enabled
-        uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
-        uint32_t total = inp1 + inp2;
-        uint32_t duty_lim = map(total, 0, nrange, 0, duty_cycle_maximum);
-        duty_lim = duty_lim < duty_cycle_mid ? duty_cycle_mid : duty_lim;
-        uint16_t p1 = map(inp1, 0, nrange/2, 0, duty_lim);
-        uint16_t p2 = map(inp2, 0, nrange/2, 0, duty_lim);
-        TIM1->CCR2 = 0;
-        TIM1->CCR1 = p1;
-        TIM1->CCR3 = p2;
-    }
-    else if ((bi_direction & 0x40) != 0 && dir1 < 0 && dir2 < 0) {
-        // both reverse, boost enabled
-        uint32_t nrange = (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band) * 2;
-        int16_t abs1 = -inp1;
-        int16_t abs2 = -inp2;
-        int32_t total = abs1 + abs2;
-        uint32_t duty_lim = map(total, 0, nrange, 0, duty_cycle_maximum);
-        duty_lim = duty_lim < duty_cycle_mid ? duty_cycle_mid : duty_lim;
-        uint16_t p1 = duty_cycle_maximum - map(abs1, 0, nrange/2, 0, duty_lim);
-        uint16_t p2 = duty_cycle_maximum - map(abs2, 0, nrange/2, 0, duty_lim);
-        TIM1->CCR2 = duty_cycle_maximum;
-        TIM1->CCR1 = p1;
-        TIM1->CCR3 = p2;
-    }
-    else if (dir1 == 0 && dir2 == 0)
+    if (dir1 == 0 && dir2 == 0)
     {
-        // if armed, this should be braking
-        TIM1->CCR2 = 0;
-        TIM1->CCR1 = 0;
-        TIM1->CCR3 = 0;
+        dualBrushedSetPWM(0, 0, 0);
+        if (!brake_on_stop) { // braking off
+            allOff(); 
+            has_init_pwm = 0; // will trigger allpwm() later if armed
+        }
+    }
+    else if ((bi_direction & 0x40) != 0) // boost mode
+    {
+        int16_t ainp1 = dir1 > 0 ? inp1 : -inp1;
+        int16_t ainp2 = dir2 > 0 ? inp2 : -inp2;
+        uint32_t totalv = ainp1 + ainp2;
+        if (dir1 == dir2 || dir1 == 0 || dir2 == 0)
+        {
+            // motors are in same direction, or only one motor in operation
+            // in this case, pick the max voltage based on which motor wanted more voltage
+            uint32_t duty_limit = map(ainp1 > ainp2 ? ainp1 : ainp2, 0, ctrl_val_mid - ctrl_deadband, 0, duty_cycle_maximum); // see how much total voltage is being requested
+            duty_limit = duty_limit > duty_cycle_maximum ? duty_cycle_maximum : duty_limit; // if the limit is reached, max voltage is being requested
+
+            if ((bi_direction & 0x20) != 0) {
+                // common load balancing mode, prevent common FETs from ever taking more load than any of the other FETs
+                uint32_t duty_sum = map(totalv, 0, ctrl_val_mid - ctrl_deadband, 0, duty_cycle_maximum);
+                if (duty_sum > duty_cycle_maximum) {
+                    duty_limit *= duty_sum;
+                    duty_limit /= duty_cycle_maximum;
+                }
+            }
+
+            int16_t p1, p2;
+            if (ainp1 > ainp2) {
+                p1 = duty_limit;
+                p2 = map(ainp2, 0, ctrl_val_mid - ctrl_deadband, 0, duty_limit);
+            }
+            else {
+                p2 = duty_limit;
+                p1 = map(ainp1, 0, ctrl_val_mid - ctrl_deadband, 0, duty_limit);
+            }
+            if (dir1 > 0 || dir2 > 0) {
+
+                dualBrushedSetPWM(0, p1, p2);
+            }
+            else if (dir1 < 0 || dir2 < 0) {
+                dualBrushedSetPWM(duty_limit, duty_limit - p1, duty_limit - p2);
+            }
+        }
+        else
+        {
+            uint32_t duty_limit = map(totalv, 0, ctrl_val_max - (ctrl_deadband * 2), 0, duty_cycle_maximum); // see how much total voltage is being requested
+            duty_limit = duty_limit > duty_cycle_maximum ? duty_cycle_maximum : duty_limit; // if the limit is reached, max voltage is being requested
+
+            if ((bi_direction & 0x20) != 0) {
+                // common load balancing mode, prevent common FETs from ever taking more load than any of the other FETs
+                uint32_t duty_sum = map(totalv, 0, ctrl_val_mid - ctrl_deadband, 0, duty_cycle_maximum);
+                if (duty_sum > duty_cycle_maximum) {
+                    duty_limit *= duty_sum;
+                    duty_limit /= duty_cycle_maximum;
+                }
+            }
+
+            int16_t p1 = map(ainp1, 0, totalv, 0, duty_limit);
+            int16_t p2 = duty_limit - p1;
+            if (dir1 > dir2) {
+                dualBrushedSetPWM(p2, duty_limit, 0);
+            }
+            else {
+                dualBrushedSetPWM(p1, 0, duty_limit);
+            }
+        }
     }
     else
     {
         // half voltage mode
-        int32_t nrange = CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MID - servo_dead_band;
+        int32_t nrange = ctrl_val_max - ctrl_val_mid - servo_dead_band;
         int16_t p1 = map(inp1, -nrange, nrange, 0, duty_cycle_maximum);
         int16_t p2 = map(inp2, -nrange, nrange, 0, duty_cycle_maximum);
-        TIM1->CCR2 = duty_cycle_mid;
-        TIM1->CCR1 = p1;
-        TIM1->CCR3 = p2;
+        dualBrushedSetPWM(duty_cycle_mid, p1, p2);
         // I'm pretty sure since all 3 channels are on the same timer, if CCR1 == CCR2, it would be just braking
         // TODO: can I implement coasting? should I bother? I need to map CCR channel number 1 2 3 against phase A B or C
     }
@@ -1985,7 +2137,6 @@ int main(void)
                 bemf_timeout = 10;
             }
         }
-#endif
 
         average_interval = e_com_time / 3;
         if (desync_check && zero_crosses > 10) {
@@ -2051,6 +2202,8 @@ int main(void)
             //  converted_degrees = getConvertedDegrees(ADC_raw_temp);
 #endif
 
+#endif // !BRUSHED_MODE
+
             //  ADC_raw_temp = ADC_raw_temp - (temperature_offset);
 
             degrees_celsius = converted_degrees;
@@ -2088,7 +2241,9 @@ int main(void)
                 zero_input_count = 0;
             }
 #endif
+#ifndef BRUSHED_MODE
         }
+#endif
 #ifdef USE_ADC_INPUT
 
         signaltimeout = 0;
@@ -2098,6 +2253,8 @@ int main(void)
             newinput = 2000;
         }
 #endif
+
+#ifndef BRUSHED_MODE
         stuckcounter = 0;
         if (stepper_sine == 0) {
             e_rpm = running * (600000 / e_com_time);      // in tens of rpm
@@ -2173,7 +2330,6 @@ int main(void)
             }
         }
         else {            // stepper sine
-
 #ifdef GIMBAL_MODE
             step_delay = 300;
             maskPhaseInterrupts();
@@ -2197,7 +2353,6 @@ int main(void)
                 current_angle++;
             }
 #else
-
             if (input > 48 && armed) {
                 if (input > 48 && input < 137) { // sine wave stepper
 
@@ -2266,7 +2421,7 @@ int main(void)
 
 #endif      // gimbal mode
         }  // stepper/sine mode end
-
+#endif // BRUSHED_MODE
 #ifdef BRUSHED_MODE
         runBrushedLoop();
 #endif

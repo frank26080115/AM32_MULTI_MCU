@@ -332,6 +332,27 @@ void USART1_IRQHandler(void)
     /* USER CODE END USART1_IRQn 1 */
 }
 
+/**
+  * @brief This function handles USART1 global interrupt / USART1 wake-up interrupt.
+  */
+void USART2_IRQHandler(void)
+{
+    /* USER CODE BEGIN USART2_IRQn 0 */
+    if(LL_USART_IsActiveFlag_IDLE(USART2)) {
+        LL_USART_ClearFlag_IDLE(USART2);
+        LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+#ifdef USE_CRSF_INPUT
+        crsf_decode();
+        crsf_startDma();
+#endif
+    }
+
+    /* USER CODE END USART2_IRQn 0 */
+    /* USER CODE BEGIN USART2_IRQn 1 */
+
+    /* USER CODE END USART2_IRQn 1 */
+}
+
 /* USER CODE BEGIN 1 */
 void TIM15_IRQHandler(void)
 {
