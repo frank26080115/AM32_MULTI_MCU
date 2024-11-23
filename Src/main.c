@@ -1015,10 +1015,12 @@ void setInput()
                         maskPhaseInterrupts();
                         brushed_direction_set = 0;
                     } else {
-                        newinput = 0;
+                        newinput = 1047;
                     }
                 }
-                adjusted_input = ((newinput - 1048) * 2 + 47) - reversing_dead_band;
+                //adjusted_input = ((newinput - 1048) * 2 + 47) - reversing_dead_band;
+								adjusted_input = map(newinput, 1047, 2047, 47, 2047);
+								//adjusted_input = adjusted_input <= 47 ? 0 : (adjusted_input - 47);
             }
             if (newinput <= 1047 && newinput > 47) {
                 if (forward == (1 - eepromBuffer.dir_reversed)) {
@@ -1029,18 +1031,29 @@ void setInput()
                         maskPhaseInterrupts();
                         brushed_direction_set = 0;
                     } else {
-                        newinput = 0;
+                        newinput = 1047;
                     }
                 }
-                adjusted_input = ((newinput - 48) * 2 + 47) - reversing_dead_band;
+                //adjusted_input = ((newinput - 48) * 2 + 47) - reversing_dead_band;
+								adjusted_input = map(newinput, 48, 1047, 2047, 47);
+								//adjusted_input = adjusted_input <= 47 ? 0 : (adjusted_input - 47);
             }
-            if (newinput < 48) {
-                adjusted_input = 0;
-                brushed_direction_set = 0;
-            }
+            //if (newinput < 48) {
+            //    adjusted_input = 0;
+            //    brushed_direction_set = 0;
+            //}
+						if (newinput >= (1047 - (servo_dead_band << 1)) && newinput <= (1047 + (servo_dead_band << 1))) {
+								adjusted_input = 0;
+								brushed_direction_set = 0;
+							  armed = 1;
+								//zero_input_count = 10;
+						}
         }
     } else {
-        adjusted_input = newinput;
+			adjusted_input = newinput > 48 ? map(newinput, 48, 2047, 47, 2047) : 0;
+			if (adjusted_input == 0) {
+				armed = 1;
+			}				
     }
 #ifndef BRUSHED_MODE
     if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
